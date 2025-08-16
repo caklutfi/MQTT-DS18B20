@@ -16,6 +16,9 @@ char mqtt_server[40] = "192.168.1.36";
 char mqtt_port[6]    = "1883";
 char mqtt_topic[50]  = "myds18b20/temp";
 
+// 🔹 Polling interval (in seconds, adjustable via WiFiManager)
+char pollingInterval[6] = "5";   // default 5 sec
+unsigned long lastMeasure = 0;   // 🔹 timer for polling
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -89,10 +92,13 @@ void setup() {
   WiFiManagerParameter custom_mqtt_server("server", "MQTT Server", mqtt_server, 40);
   WiFiManagerParameter custom_mqtt_port("port", "MQTT Port", mqtt_port, 6);
   WiFiManagerParameter custom_mqtt_topic("topic", "MQTT Topic", mqtt_topic, 50);
+  // 🔹 New WiFiManager field for polling interval
+  WiFiManagerParameter custom_polling("poll", "Polling Interval (sec)", pollingInterval, 6);
 
   wm.addParameter(&custom_mqtt_server);
   wm.addParameter(&custom_mqtt_port);
   wm.addParameter(&custom_mqtt_topic);
+  wm.addParameter(&custom_polling); // 🔹 add new param
 
   // Try auto connect
   if (!wm.autoConnect("ESP-TempSetup")) {
@@ -113,6 +119,7 @@ void setup() {
   strcpy(mqtt_server, custom_mqtt_server.getValue());
   strcpy(mqtt_port,   custom_mqtt_port.getValue());
   strcpy(mqtt_topic,  custom_mqtt_topic.getValue());
+  strcpy(pollingInterval, custom_polling.getValue()); // 🔹 save polling interval
 
   saveConfig(); // 🔹 persist settings
 
@@ -131,59 +138,65 @@ void loop() {
   }
   client.loop();
 
-  sensors.requestTemperatures();
-  float tempC = sensors.getTempCByIndex(0);
-  String nowTime = getCurrentTime();
+  // 🔹 Use non-blocking timer instead of fixed delay(5000)
+  int pollSec = atoi(pollingInterval);
+  if (pollSec < 1) pollSec = 1; // minimum 1s
 
-  // Prepare temp string
-  char tempStr[8];
-  dtostrf(tempC, 1, 2, tempStr);
+  if (millis() - lastMeasure >= (pollSec * 1000)) {
+    lastMeasure = millis();
 
-  // Publish to MQTT
-  if (!client.publish(mqtt_topic, tempStr)) {
-    lastPublishFailed = true;
-    unsigned long now = millis();
-    if (now - lastBlink > 500) {
-      invertState = !invertState;
-      display.invertDisplay(invertState);
-      lastBlink = now;
+    sensors.requestTemperatures();
+    float tempC = sensors.getTempCByIndex(0);
+    String nowTime = getCurrentTime();
+
+    // Prepare temp string
+    char tempStr[8];
+    dtostrf(tempC, 1, 2, tempStr);
+
+    // Publish to MQTT
+    if (!client.publish(mqtt_topic, tempStr)) {
+      lastPublishFailed = true;
+      unsigned long now = millis();
+      if (now - lastBlink > 500) {
+        invertState = !invertState;
+        display.invertDisplay(invertState);
+        lastBlink = now;
+      }
+    } else {
+      lastPublishFailed = false;
+      display.invertDisplay(false);
+      // Only update prev values if publish successful
+      prevTemp = tempC;
+      prevTime = nowTime;
     }
-  } else {
-    lastPublishFailed = false;
-    display.invertDisplay(false);
-    // Only update prev values if publish successful
-    prevTemp = tempC;
-    prevTime = nowTime;
+
+    // Display current temp (big)
+    display.clearDisplay();
+    display.setTextSize(4);
+    display.setTextColor(SSD1306_WHITE);
+
+    int16_t x1, y1;
+    uint16_t w, h;
+    display.getTextBounds(tempStr, 0, 0, &x1, &y1, &w, &h);
+    display.setCursor((SCREEN_WIDTH - w) / 2, (SCREEN_HEIGHT - h) / 2 - 10);
+    display.print(tempStr);
+
+    // Bottom line: previous temp & timestamp
+    display.setTextSize(1);
+    display.setCursor(0, SCREEN_HEIGHT - 8);
+    if (!isnan(prevTemp)) {
+      display.printf("%.2fC @ %s", prevTemp, prevTime.c_str());
+    } else {
+      display.print("--.--C @ --:--:--");
+    }
+
+    // Add "X" if last publish failed
+    if (lastPublishFailed) {
+      display.print(" X");
+    }
+
+    display.display();
   }
-
-  // Display current temp (big)
-  display.clearDisplay();
-  display.setTextSize(4);
-  display.setTextColor(SSD1306_WHITE);
-
-  int16_t x1, y1;
-  uint16_t w, h;
-  display.getTextBounds(tempStr, 0, 0, &x1, &y1, &w, &h);
-  display.setCursor((SCREEN_WIDTH - w) / 2, (SCREEN_HEIGHT - h) / 2 - 10);
-  display.print(tempStr);
-
-  // Bottom line: previous temp & timestamp
-  display.setTextSize(1);
-  display.setCursor(0, SCREEN_HEIGHT - 8);
-  if (!isnan(prevTemp)) {
-    display.printf("%.2fC @ %s", prevTemp, prevTime.c_str());
-  } else {
-    display.print("--.--C @ --:--:--");
-  }
-
-  // Add "X" if last publish failed
-  if (lastPublishFailed) {
-    display.print(" X");
-  }
-
-  display.display();
-
-  delay(5000);
 }
 
 bool loadConfig() {
@@ -195,7 +208,7 @@ bool loadConfig() {
   File configFile = LittleFS.open("/config.json", "r");
   if (!configFile) return false;
 
-  StaticJsonDocument<200> doc;
+  StaticJsonDocument<256> doc; // 🔹 increased size for extra field
   DeserializationError error = deserializeJson(doc, configFile);
   if (error) {
     Serial.println("Failed to read file");
@@ -205,16 +218,18 @@ bool loadConfig() {
   strlcpy(mqtt_server, doc["server"] | "192.168.1.36", sizeof(mqtt_server));
   strlcpy(mqtt_port,   doc["port"]   | "1883", sizeof(mqtt_port));
   strlcpy(mqtt_topic,  doc["topic"]  | "myds18b20/temp", sizeof(mqtt_topic));
+  strlcpy(pollingInterval, doc["polling"] | "5", sizeof(pollingInterval)); // 🔹 load polling
 
   configFile.close();
   return true;
 }
 
 bool saveConfig() {
-  StaticJsonDocument<200> doc;
+  StaticJsonDocument<256> doc; // 🔹 increased size
   doc["server"] = mqtt_server;
   doc["port"]   = mqtt_port;
   doc["topic"]  = mqtt_topic;
+  doc["polling"] = pollingInterval; // 🔹 save polling
 
   File configFile = LittleFS.open("/config.json", "w");
   if (!configFile) return false;
