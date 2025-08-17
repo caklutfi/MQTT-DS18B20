@@ -11,8 +11,9 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 
+
 // ==== MQTT ====
-char mqtt_server[40] = "192.168.1.36";
+char mqtt_server[40] = "test.mosquitto.org";
 char mqtt_port[6]    = "1883";
 char mqtt_topic[50]  = "myds18b20/temp";
 
@@ -112,8 +113,33 @@ void setup() {
   }
 
   // Optional: Allow config portal for 30s at boot
-  wm.setConfigPortalTimeout(30);
+  // Set NTP servers
+  configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org", "time.nist.gov");
+
+  // ==== Wait until NTP time is ready ====
+  struct tm timeinfo;
+  int retries = 0;
+  while (!getLocalTime(&timeinfo) && retries < 20) {  // wait up to ~10s
+    delay(500);
+    retries++;
+  }
+
+  // ==== NEW FEATURE: Show timestamp when portal starts ====
+  String startTime = getCurrentTime();
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 10);
+  display.println("Config Portal");
+  display.setCursor(0, 25);
+  display.printf("Start @ %s", startTime.c_str());
+  display.display();
+  delay(2000);
+
+  // Optional: Allow config portal for 30s at boot
+  wm.setConfigPortalTimeout(15);
   wm.startConfigPortal("ESP-TempSetup");
+
 
   // --- Save new values if updated ---
   strcpy(mqtt_server, custom_mqtt_server.getValue());
