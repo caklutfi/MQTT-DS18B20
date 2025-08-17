@@ -72,6 +72,62 @@ String getCurrentTime() {
   return String(timeStr);
 }
 
+void configModeCallback (WiFiManager *myWiFiManager) {
+  String startTime = getCurrentTime();
+  String apSSID = myWiFiManager->getConfigPortalSSID();
+  String apIP   = WiFi.softAPIP().toString();
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("Config Portal");
+
+  display.setCursor(0, 12);
+  display.printf("SSID: %s", apSSID.c_str());
+
+  display.setCursor(0, 24);
+  display.printf("IP: %s", apIP.c_str());
+
+  display.setCursor(0, 36);
+  display.printf("Start @ %s", startTime.c_str());
+
+  display.display();
+}
+
+void saveConfigCallback() {
+  showSTAInfo();  // reuse function below
+}
+
+unsigned long infoShownAt = 0;
+bool showingInfo = false;
+
+void showSTAInfo() {
+  String staSSID = WiFi.SSID();
+  String staIP   = WiFi.localIP().toString();
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("Connected!");
+
+  display.setCursor(0, 12);
+  display.printf("SSID: %s", staSSID.c_str());
+
+  display.setCursor(0, 24);
+  display.printf("IP: %s", staIP.c_str());
+
+  display.setCursor(0, 36);
+  display.printf("Time: %s", getCurrentTime().c_str());
+
+  display.display();
+
+  infoShownAt = millis();
+  showingInfo = true;
+}
+
+
 void setup() {
   Serial.begin(115200);
 
@@ -123,22 +179,25 @@ void setup() {
     delay(500);
     retries++;
   }
+ String startTime = getCurrentTime();
 
-  // ==== NEW FEATURE: Show timestamp when portal starts ====
-  String startTime = getCurrentTime();
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 10);
-  display.println("Config Portal");
-  display.setCursor(0, 25);
-  display.printf("Start @ %s", startTime.c_str());
-  display.display();
-  delay(2000);
+
+
+
+
+  // show AP SSID/IP when portal starts
+  wm.setAPCallback(configModeCallback);
+
+  // show STA SSID/IP after credentials are saved
+  wm.setSaveConfigCallback(saveConfigCallback);
+
+
 
   // Optional: Allow config portal for 30s at boot
   wm.setConfigPortalTimeout(15);
   wm.startConfigPortal("ESP-TempSetup");
+
+  
 
 
   // --- Save new values if updated ---
@@ -156,13 +215,34 @@ void setup() {
   sensors.begin();
 }
 
-
+String lastShownSSID = "";
+String lastShownIP   = "";
 
 void loop() {
   if (!client.connected()) {
     reconnectMQTT();
   }
   client.loop();
+
+// --- Monitor WiFi reconnect ---
+  if (WiFi.status() == WL_CONNECTED) {
+    String currentSSID = WiFi.SSID();
+    String currentIP   = WiFi.localIP().toString();
+
+    if (currentSSID != lastShownSSID || currentIP != lastShownIP) {
+      showSTAInfo();
+      lastShownSSID = currentSSID;
+      lastShownIP   = currentIP;
+    }
+  }
+
+    // --- Keep info screen for 7s ---
+  if (showingInfo && millis() - infoShownAt < 7000) {
+    // still showing info → skip normal display
+    return;
+  } else {
+    showingInfo = false;
+  }
 
   // 🔹 Use non-blocking timer instead of fixed delay(5000)
   int pollSec = atoi(pollingInterval);
@@ -241,7 +321,7 @@ bool loadConfig() {
     return false;
   }
 
-  strlcpy(mqtt_server, doc["server"] | "192.168.1.36", sizeof(mqtt_server));
+  strlcpy(mqtt_server, doc["server"] | "test.mosquitto.org", sizeof(mqtt_server));
   strlcpy(mqtt_port,   doc["port"]   | "1883", sizeof(mqtt_port));
   strlcpy(mqtt_topic,  doc["topic"]  | "myds18b20/temp", sizeof(mqtt_topic));
   strlcpy(pollingInterval, doc["polling"] | "5", sizeof(pollingInterval)); // 🔹 load polling
